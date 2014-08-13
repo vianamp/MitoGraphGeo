@@ -1,4 +1,4 @@
-MitoGraphGeo
-============
+MitoGraph
+=========
 
-Analysis of Spatial Organisation of Mitochondrial Networks
+Software for Quantifying Mitochondrial Content in Live Cells
