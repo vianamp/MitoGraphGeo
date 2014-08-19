@@ -1,0 +1,10 @@
+MitoGraph V2.0
+Folder: /Users/Viana/GitHub/MitoGraphGeo//
+Pixel size: -xy 1.0000um, -z 1.0000um
+Average tubule radius: -r 0.1500um
+Scales: -scales 1.00 1.10 1.20 1.30 1.40 1.50
+Post-divergence threshold: -threshold 0.16667
+Thu Aug 14 09:55:17 2014
+
+Image path	surface-volume (um3)	total length (um)	skeleton-volume (um3)
+/Users/Viana/GitHub/MitoGraphGeo//001001	4459.00000	617.49043	43.64783

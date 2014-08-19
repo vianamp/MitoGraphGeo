@@ -9,6 +9,7 @@
 #include <vtkSmartPointer.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
+#include <vtkAppendPolyData.h>
 #include <vtkPolyDataReader.h>
 #include <vtkPolyDataWriter.h>
 #include <vtkCellArray.h>
@@ -22,17 +23,58 @@
 #include <vtkKochanekSpline.h>
 #include <vtkParametricFunctionSource.h>
 
-
 #define _min(a,b) ((a<b)?a:b)
 #define _max(a,b) ((a>b)?a:b)
 #define _eps 1E-6
 
-double GetLength(vtkCell *Line, vtkPoints *Points, bool plot) {
+	class _curve {
+	private:
+		vtkIdType n;
+		int dsl, dsr;
+		double _spacing, R2;
+		vtkSmartPointer<vtkPolyData> Spline;
+		vtkSmartPointer<vtkFloatArray> Tx;
+		vtkSmartPointer<vtkFloatArray> Ty;
+		vtkSmartPointer<vtkFloatArray> Tz;
+		vtkSmartPointer<vtkFloatArray> Kr;
+		void SetTangent(vtkIdType id, double t[3]);
+		void SetTangent(vtkIdType id, double tx, double ty, double tz);
+		void GetTangent(vtkIdType id, double t[3]);
+	public:
+		std::vector<double> TCorr;
+		_curve(vtkPolyData *Skeleton, vtkIdType cell_id, double spacing);
+		~_curve() {
+			TCorr.clear();
+		}
+		vtkIdType GetNumberOfPoints() {return n;}
+		void CalculateTangentVersors(int order);
+		void CalculateAverageTangentCorrelation();
+		void CalculateEndFluctuations();
+		void CalculateCurvature();
+		double GetSpacing() {return _spacing;}
+		double GetLength() {return n * _spacing;}
+		double GetR2() {return R2;}
+		void GetSplinePolyData(vtkPolyData *Line);
+		void ExportCurvatures(FILE *f);
+
+	};
+
+	void GeometricalAnalysis(const char FilePrefix[]);
+	void ExportResults(std::vector<_curve> Curves, const char FilePrefix[]);
+	double DotProduct(double to[3], double tf[3]);
+	double GetLength(vtkPolyData *Skeleton, vtkIdType cell_id, bool plot);
+
+/* ====================================================================
+	AUXILIAR FUNCTIONS
+======================================================================*/
+
+double GetLength(vtkPolyData *Skeleton, vtkIdType cell_id, bool plot) {
 	double ds = 0.0, d2 = 0.0;
 	double r[3], u[3], d, length = 0.0;
+	vtkCell *Line = Skeleton -> GetCell(cell_id);
 	for (int i = 1; i < Line -> GetNumberOfPoints(); i++) {
-		Points -> GetPoint(Line->GetPointId(i-1),u);
-		Points -> GetPoint(Line->GetPointId(i-0),r);
+		Skeleton -> GetPoints() -> GetPoint(Line->GetPointId(i-1),u);
+		Skeleton -> GetPoints() -> GetPoint(Line->GetPointId(i-0),r);
 		d = sqrt(pow(r[0]-u[0],2)+pow(r[1]-u[1],2)+pow(r[2]-u[2],2));
 		length += d;
 		ds += d;
@@ -46,175 +88,153 @@ double GetLength(vtkCell *Line, vtkPoints *Points, bool plot) {
 	}
 	return length;
 }
-/*
-struct _point{
-	double x, y, z, s;
+
+double DotProduct(double to[3], double tf[3]) {
+	double dotp = to[0]*tf[0] + to[1]*tf[1] + to[2]*tf[2];
+	dotp = (dotp> 1.00) ? 1.00 : dotp;
+	dotp = (dotp<-1.00) ?-1.00 : dotp;
+	return dotp;
+}
+
+void GeometricalAnalysis(const char FilePrefix[]) {
 	
-	double tx, ty, tz;
-	double k, tcorr;
+	char _FullPath[256];
+	sprintf(_FullPath,"%s_skeleton.vtk",FilePrefix);
 
-	_point (double _x, double _y, double _z, double _s) {
-		x = _x; y = _y; z = _z; s = _s;
+	vtkSmartPointer<vtkPolyDataReader> PolyReader = vtkSmartPointer<vtkPolyDataReader>::New();
+	PolyReader -> SetFileName(_FullPath);
+	PolyReader -> Update();
+
+	vtkPolyData *Skell = PolyReader -> GetOutput();
+
+	int NLines = Skell -> GetNumberOfCells();
+
+	std::vector<_curve> Curves;
+
+	int line;
+	double edge_length;
+	for (line = 0; line < NLines; line++) {
+		edge_length = GetLength(Skell,line,false);
+		if ( edge_length > 1.5 ) {
+			#ifdef DEBUG
+				printf("Edge: %d (%1.4fum)\n",line,edge_length);
+			#endif
+			_curve curve(Skell,line,0.1);
+			curve.CalculateTangentVersors(1);
+			curve.CalculateAverageTangentCorrelation();
+			curve.CalculateCurvature();
+			curve.CalculateEndFluctuations();
+			Curves.push_back(curve);
+		}
 	}
-	_point (double r[3], double _s) {
-		x = r[0]; y = r[1]; z = r[2]; s = _s;
-	}
-};
-
-class _curve {
-private:
-	int dsl, dsr;
-public:
-	double length;
-	std::vector<_point> Points;
-	void SetOrder(int order) {
-		dsl = order;
-		dsr = (order) ? order : 1;
-	}
-	_curve(vtkCell *Line, vtkPoints *VtkPts);
-	void CalculateTangentVectors();
-	void CalculateTangentCorrelation();
-	void PrintProperties();
-	void CalculateCurvature();
-	void ExportPolyData(const char FileName[]);
-};
-
-_curve::_curve(vtkCell *Line, vtkPoints *VtkPts) {
-	vtkSmartPointer<vtkPoints> SplinePoints = vtkSmartPointer<vtkPoints>::New();
-
-	int i;
-	length = 0.0;		
-	dsl = 0; dsr = 1;
-	double r[3], u[3];
-
-	for (i = 0; i < Line->GetNumberOfPoints(); i++) {
-		VtkPts -> GetPoint(Line->GetPointId(i-0),r);
-		SplinePoints -> InsertNextPoint(r);
+	
+	if (Curves.size()) {
+		ExportResults(Curves,FilePrefix);
+	} else {
+		printf("No edges long enough found.\n");
 	}
 
-	vtkSmartPointer<vtkCellArray> Line = vtkSmartPointer<vtkCellArray>::New();
-	Line -> InsertNextCell(c);
-	for (i = 0; i < c; i++) {
-		Line -> InsertCellPoint(i);
-		Scalar -> SetTuple1(i,Points[i+dsl].k);
-	}
-	vtkSmartPointer<vtkPolyData> PolyLine = vtkSmartPointer<vtkPolyData>::New();
-	PolyLine -> SetPoints(vtkPts);
-	PolyLine -> SetLines(Line);
-	PolyLine -> GetPointData() -> SetScalars(Scalar);
-
-
-	vtkSmartPointer<vtkParametricSpline> Spline = vtkSmartPointer<vtkParametricSpline>::New();
-	Spline -> SetPoints(SplinePoints);
-	Spline -> ClosedOff();
-	Spline -> ParameterizeByLengthOn();
-
-	vtkSmartPointer<vtkSplineFilter> SplineFilter = vtkSmartPointer<vtkSplineFilter>::New();
-	SplineFilter->SetSpline(Spline);
-	SplineFilter->SetInputConnection(SplinePoints);
-	SplineFilter->SetSubdivideToLength();
-	SplineFilter->SetLength( 0.18648 );
-	SplineFilter->Update( );
-
-	u[0] = 0.0;
-	do {
-		Spline -> Evaluate(u,r,NULL);
-		_point point(r,0.0);
-		Points.push_back(point);
-		u[0] += 0.01;
-	} while (fabs(1.0-u[0])>1E-5);
-
-	double dij = 0.0;
-	double dijs = 0.0;
-	double dij2 = 0.0;
-	for (i = 1; i < Points.size(); i++) {
-		dij = sqrt(pow(Points[i].x-Points[i-1].x,2)+pow(Points[i].y-Points[i-1].y,2)+pow(Points[i].z-Points[i-1].z,2));
-		dijs += dij;
-		dij2 += dij*dij;
-	}
-
-	dijs /= Points.size() - 1;
-	dij2 /= Points.size() - 1;
-
-	printf("%f\t%f\n",dijs,sqrt(dij2-dij*dij));
-
-	//VtkPts -> GetPoint(Line->GetPointId(0),r);
-	//_point point(r,s);
-	//Points.push_back(point);
-
-	//double v[3];
-
+	Curves.clear();
 }
 
-void _curve::CalculateTangentVectors() {
-	int i;
-	double Tn;
-	for (i = dsl; i < Points.size()-dsr; i++) {
-		Points[i].tx = Points[i+dsr].x - Points[i-dsl].x;
-		Points[i].ty = Points[i+dsr].y - Points[i-dsl].y;
-		Points[i].tz = Points[i+dsr].z - Points[i-dsl].z;
-		Tn = sqrt(pow(Points[i].tx,2)+pow(Points[i].ty,2)+pow(Points[i].tz,2));
-		Points[i].tx /= Tn;
-		Points[i].ty /= Tn;
-		Points[i].tz /= Tn;
-		printf("Tn = %f\n",Tn);
-	}
-}
+void ExportResults(std::vector<_curve> Curves, const char FilePrefix[]) {
 
-void _curve::CalculateTangentCorrelation() {
-	int i;
-	for (i = dsl; i < Points.size()-dsr; i++) {
-		Points[i].tcorr = Points[dsl].tx * Points[i].tx + Points[dsl].ty * Points[i].ty + Points[dsl].tz * Points[i].tz;
-		Points[i].tcorr = (Points[i].tcorr > 1.00) ? 1.00 : Points[i].tcorr;
-	}
-}
+	#ifdef DEBUG
+		printf("Calculating tangent correlation decay...\n");
+	#endif
 
-void _curve::CalculateCurvature() {
-	int i;
-	for (i = dsl; i < Points.size()-dsr; i++) {
-		Points[i].k = fabs( acos(Points[i].tcorr) / (Points[i+dsr].s - Points[i-dsl].s) );
-	}
-}
+	int p, c;
+	double s = Curves[0].GetSpacing();
 
-void _curve::PrintProperties() {
-	int i;
-	for (i = dsl; i < Points.size()-dsr; i++) {
-		printf("%f\t%f\t%f\n",Points[i].s,Points[i].tcorr,Points[i].k);
-	}
-}
+	#ifdef DEBUG
+		printf("\t#Curves: %d\n",(int)Curves.size());
+	#endif
 
-void _curve::ExportPolyData(const char FileName[]) {
-	int i, c = 0;;
-	vtkSmartPointer<vtkPoints> vtkPts = vtkSmartPointer<vtkPoints>::New();
-	for (i = dsl; i < Points.size()-dsr; i++) {
-		vtkPts -> InsertNextPoint(Points[i].x,Points[i].y,Points[i].z);
-		c++;
+	int max_length = 0;
+	for (c = 0; c < Curves.size(); c++) {
+		max_length = (Curves[c].TCorr.size()>max_length) ? Curves[c].TCorr.size() : max_length;
 	}
-	vtkSmartPointer<vtkFloatArray> Scalar = vtkSmartPointer<vtkFloatArray>::New();
-	Scalar -> SetNumberOfComponents(1);
-	Scalar -> SetNumberOfTuples(c);
-	vtkSmartPointer<vtkCellArray> Line = vtkSmartPointer<vtkCellArray>::New();
-	Line -> InsertNextCell(c);
-	for (i = 0; i < c; i++) {
-		Line -> InsertCellPoint(i);
-		Scalar -> SetTuple1(i,Points[i+dsl].k);
+
+	int *Count = new int[max_length];
+	double *TCorr = new double[max_length];
+
+	for (p = 0; p < max_length; p++) {
+		Count[p] = 0;
+		TCorr[p] = 0.0;
 	}
-	vtkSmartPointer<vtkPolyData> PolyLine = vtkSmartPointer<vtkPolyData>::New();
-	PolyLine -> SetPoints(vtkPts);
-	PolyLine -> SetLines(Line);
-	PolyLine -> GetPointData() -> SetScalars(Scalar);
+
+	for (c = 0; c < Curves.size(); c++) {
+		for (p = 0; p < Curves[c].TCorr.size(); p++) {
+			Count[p] ++;
+			TCorr[p] += Curves[c].TCorr[p];
+		}
+	}
+
+	char _FullPath[256];
+	sprintf(_FullPath,"%s.tcorr",FilePrefix);
+	FILE *f = fopen(_FullPath,"w");
+	fprintf(f,"Vectors Spacing (um)\tTangent Correlation\n");
+	fprintf(f,"%1.4f\t%1.6f\n",0.0,1.0);
+	for (p = 0; p < max_length; p++) {
+		fprintf(f,"%1.4f\t%1.6f\n",p*s,TCorr[p]/Count[p]);
+	}
+	fclose(f);
+	delete[] TCorr;
+	delete[] Count;
+
+	vtkSmartPointer<vtkAppendPolyData> Append = vtkSmartPointer<vtkAppendPolyData>::New();
+
+	for (c = 0; c < Curves.size(); c++) {
+		vtkSmartPointer<vtkPolyData> Line = vtkSmartPointer<vtkPolyData>::New();
+		Curves[c].GetSplinePolyData(Line);
+		Append -> AddInputData(Line);
+	}
+	Append -> Update();
+
+	sprintf(_FullPath,"%s_lines.vtk",FilePrefix);
 	vtkSmartPointer<vtkPolyDataWriter> Writer = vtkSmartPointer<vtkPolyDataWriter>::New();
-	Writer -> SetFileName(FileName);
-	Writer -> SetInputData(PolyLine);
+	Writer -> SetInputData(Append->GetOutput());
+	Writer -> SetFileName(_FullPath);
 	Writer -> Write();
 
-}
-*/
-void NewFuckingRoutine(vtkCell *Line, vtkPoints *Points) {
-	
-	int i;
-	double r[3];
+	sprintf(_FullPath,"%s.curv",FilePrefix);
+	FILE *fc = fopen(_FullPath,"w");
+	fprintf(fc,"Curvature\n");
+	for (c = 0; c < Curves.size(); c++) {
+		Curves[c].ExportCurvatures(fc);
+	}
+	fclose(fc);
 
+	sprintf(_FullPath,"%s.r2",FilePrefix);
+	FILE *fr = fopen(_FullPath,"w");
+	fprintf(fr,"Length (um) End-To-Edge Distance (um) End-To-Edge Distance^2 (um^2)\n");
+	for (c = 0; c < Curves.size(); c++) {
+		fprintf(fr,"%1.6f\t%1.6f\t%1.6f\n",Curves[c].GetLength(),sqrt(Curves[c].GetR2()),Curves[c].GetR2());
+	}
+	fclose(fr);
+
+	#ifdef DEBUG
+		printf("\tDone!\n");
+	#endif
+
+}
+
+/* ====================================================================
+	_CURVE METHODS
+======================================================================*/
+
+_curve::_curve(vtkPolyData *Skeleton, vtkIdType cell_id, double spacing) {
+
+	#ifdef DEBUG
+		printf("\tGenerating new spline representation...\n");
+	#endif
+
+	vtkIdType i;
+	double r[3];
+	_spacing = spacing;
+
+	vtkPoints *Points = Skeleton -> GetPoints();
+	vtkCell *Line = Skeleton -> GetCell(cell_id);
 	vtkSmartPointer<vtkPoints> LinePoints = vtkSmartPointer<vtkPoints>::New();
 	for (i = 0; i < Line->GetNumberOfPoints(); i++) {
 		Points -> GetPoint(Line->GetPointId(i),r);
@@ -228,75 +248,144 @@ void NewFuckingRoutine(vtkCell *Line, vtkPoints *Points) {
 	vtkSmartPointer<vtkPolyData> PolyDataLine = vtkSmartPointer<vtkPolyData>::New();
 	PolyDataLine -> SetPoints(LinePoints);
 	PolyDataLine -> SetLines(LineCellArray);
-/*
-	vtkSmartPointer<vtkParametricSpline> Spline = vtkSmartPointer<vtkParametricSpline>::New();
-	Spline -> SetPoints(LinePoints);
-	Spline -> ClosedOff();
-	Spline -> ParameterizeByLengthOn();
-*/
+
 	vtkSmartPointer<vtkKochanekSpline> SplineModel = vtkSmartPointer<vtkKochanekSpline>::New();
 
 	vtkSmartPointer<vtkSplineFilter> SplineFilter = vtkSmartPointer<vtkSplineFilter>::New();
 	SplineFilter->SetSpline(SplineModel);
 	SplineFilter->SetInputData(PolyDataLine);
 	SplineFilter->SetSubdivideToLength();
-	SplineFilter->SetLength(0.01);
+	SplineFilter->SetLength(_spacing);
 	SplineFilter->Update();
 
-	vtkPolyData *Spline = SplineFilter -> GetOutput();
+	Spline = SplineFilter -> GetOutput();
+	n = Spline -> GetNumberOfPoints();
 
-	printf("#Points 0: %d\n",(int)Line->GetNumberOfPoints());
-	printf("#Points 1: %d\n",(int)Spline->GetNumberOfPoints());
+	#ifdef DEBUG
+		printf("\tDone!\n");
+	#endif
+}
 
-	printf("#Length 0: %f\n",GetLength(Line,Points,false));
-	printf("#Length 1: %f\n",GetLength(Spline->GetCell(0),Spline->GetPoints(),true));
+void _curve::SetTangent(vtkIdType id, double t[3]) {
+	double tnorm = sqrt(pow(t[0],2)+pow(t[1],2)+pow(t[2],2));
+	Tx -> SetTuple1(id,t[0]/tnorm);
+	Ty -> SetTuple1(id,t[1]/tnorm);
+	Tz -> SetTuple1(id,t[2]/tnorm);
+}
 
+void _curve::SetTangent(vtkIdType id, double tx, double ty, double tz) {
+	double tnorm = sqrt(pow(tx,2)+pow(ty,2)+pow(tz,2));
+	Tx -> SetTuple1(id,tx/tnorm);
+	Ty -> SetTuple1(id,ty/tnorm);
+	Tz -> SetTuple1(id,tz/tnorm);
+	//printf("\t\t%f\t%f\n",tx/tnorm,ty/tnorm);
+}
+
+void _curve::GetTangent(vtkIdType id, double t[3]) {
+	t[0] = Tx -> GetTuple1(id);
+	t[1] = Ty -> GetTuple1(id);
+	t[2] = Tz -> GetTuple1(id);
+}
+
+void _curve::CalculateTangentVersors(int order) {
+	
+	dsl = order;
+	dsr = (order) ? order : 1;
+	
+	Tx = vtkSmartPointer<vtkFloatArray>::New();
+	Ty = vtkSmartPointer<vtkFloatArray>::New();
+	Tz = vtkSmartPointer<vtkFloatArray>::New();
+	Tx -> SetNumberOfComponents(1);
+	Ty -> SetNumberOfComponents(1);
+	Tz -> SetNumberOfComponents(1);
+	Tx -> SetNumberOfTuples(n);
+	Ty -> SetNumberOfTuples(n);
+	Tz -> SetNumberOfTuples(n);
+
+	vtkIdType id;
+	double r[3], u[3];
+	for (id = dsl; id < n - dsr; id++) {
+		Spline -> GetPoints() -> GetPoint(id+dsr,r);
+		Spline -> GetPoints() -> GetPoint(id-dsl,u);
+		SetTangent(id,r[0]-u[0],r[1]-u[1],r[2]-u[2]);
+	}
 
 }
 
-void TestRun(const char FilePrefix[]) {
-	
-	char _FullPath[256];
-	sprintf(_FullPath,"%s_skeleton.vtk",FilePrefix);
+void _curve::CalculateAverageTangentCorrelation() {
+	int s;
+	vtkIdType id;
+	double to[3], tf[3], tcorr;
+	int ndist = (int)(0.9*GetLength()/_spacing)-dsr-dsl;
+	#ifdef DEBUG
+		printf("\tTangent correlation...\n");
+		printf("\t>NDist = %d\n",ndist);
+	#endif
 
-	vtkSmartPointer<vtkPolyDataReader> PolyReader = vtkSmartPointer<vtkPolyDataReader>::New();
-	PolyReader -> SetFileName(_FullPath);
-	PolyReader -> Update();
-
-	vtkPolyData *Skell = PolyReader -> GetOutput();
-	vtkPoints *VtkPts = Skell -> GetPoints();
-
-	int NLines = Skell -> GetNumberOfCells();
-
-	//std::vector<_curve> Curves;
-
-	int line;
-	for (line = 0; line < NLines; line++) {
-		if ( GetLength(Skell->GetCell(line),VtkPts,false) > 3.0 ) {
-			NewFuckingRoutine(Skell->GetCell(line),VtkPts);
+	for (s = 1; s < ndist; s++) {
+		tcorr = 0.0;
+		for (id = dsl; id < n - dsr - s; id++) {
+			GetTangent(id+0,to);
+			GetTangent(id+s,tf);
+			tcorr += DotProduct(to,tf);
 		}
-/*		_curve curve(Skell->GetCell(line),VtkPts);
-		curve.SetOrder(2);
-		if (curve.length>3.0) {
-			curve.CalculateTangentVectors();
-			curve.CalculateTangentCorrelation();
-			curve.CalculateCurvature();
-			Curves.push_back(curve);
-		}
-*/	}
-
-/*	int curve, co = -1;
-	double lmax = 0.0;
-	for (curve = 0;  curve < Curves.size(); curve++) {
-		//Curves[curve].PrintProperties();
-		printf("%f\n",Curves[curve].length);
-		if (Curves[curve].length > lmax) {
-			lmax = Curves[curve].length;
-			co = curve;
-		}
+		TCorr.push_back(tcorr / ((n-dsr-s) - dsl));
 	}
-	if (co>=0) Curves[co].ExportPolyData("temp.vtk");
-*/
+}
+
+void _curve::CalculateCurvature() {
+	#ifdef DEBUG
+		printf("\tCurvature...\n");
+	#endif
+
+	vtkIdType id;
+	double to[3], tf[3], k;
+	Kr = vtkSmartPointer<vtkFloatArray>::New();
+	Kr -> SetNumberOfComponents(1);
+	Kr -> SetNumberOfTuples(n);
+	Kr -> FillComponent(0,0);
+	for (id = dsl; id < n - dsr - 1; id++) {
+		GetTangent(id+0,to);
+		GetTangent(id+1,tf);
+		//k = ||dT/ds||
+		k = sqrt(pow(tf[0]-to[0],2)+pow(tf[1]-to[1],2)+pow(tf[2]-to[2],2)) / _spacing;
+		Kr -> SetTuple1(id,k);
+	}
+}
+void _curve::GetSplinePolyData(vtkPolyData *Line) {
+	double r[3];
+	vtkSmartPointer<vtkPoints> LinePoints = vtkSmartPointer<vtkPoints>::New();
+	vtkSmartPointer<vtkCellArray> LineCellArray = vtkSmartPointer<vtkCellArray>::New();
+	LineCellArray -> InsertNextCell(n-dsr-dsl);
+	vtkSmartPointer<vtkFloatArray> Curvature = vtkSmartPointer<vtkFloatArray>::New();
+	Curvature -> SetNumberOfComponents(1);
+	Curvature -> SetNumberOfTuples(n-dsr-dsl);
+	Curvature -> FillComponent(0,0);
+	Curvature -> SetName("Curvature");
+
+	for (vtkIdType id = dsl; id < n - dsr; id++) {
+		Spline -> GetPoint(id,r);
+		LinePoints -> InsertNextPoint(r);
+		LineCellArray -> InsertCellPoint(id-dsl);
+		Curvature -> SetTuple1(id-dsl,Kr->GetTuple1(id));
+	}
+
+	Line -> SetPoints(LinePoints);
+	Line -> SetLines(LineCellArray);
+	Line -> GetPointData() -> SetScalars(Curvature);
+}
+
+void _curve::ExportCurvatures(FILE *f) {
+	for (vtkIdType id = dsl; id < n - dsr - 1; id++) {
+		fprintf(f,"%1.6f\n",Kr->GetTuple1(id));
+	}
+}
+
+void _curve::CalculateEndFluctuations() {
+	double ro[3], rf[3];
+	Spline -> GetPoints() -> GetPoint(0,ro);
+	Spline -> GetPoints() -> GetPoint(Spline->GetNumberOfPoints()-1,rf);
+	R2 = pow(rf[0]-ro[0],2) + pow(rf[1]-ro[1],2) + pow(rf[2]-ro[2],2);
 }
 
 /* =================================================================
@@ -333,8 +422,8 @@ int main(int argc, char *argv[]) {
 	while (fgets(_PrefixFile,256, f) != NULL) {
 		_PrefixFile[strcspn(_PrefixFile, "\n" )] = '\0';
 		
-		TestRun(_PrefixFile);
 		printf("%s\n",_PrefixFile);
+		GeometricalAnalysis(_PrefixFile);
 	
 	}
 	fclose(f);
