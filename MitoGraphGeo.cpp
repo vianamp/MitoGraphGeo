@@ -27,6 +27,31 @@
 #define _max(a,b) ((a>b)?a:b)
 #define _eps 1E-6
 
+	class _points {
+	private:
+		double Bounds[6];
+		vtkSmartPointer<vtkPoints> Points;
+		vtkSmartPointer<vtkPolyData> PolyPoints;
+		vtkSmartPointer<vtkKdTreePointLocator> Tree;
+
+	public:
+		std::vector<double> D1;
+		std::vector<double> D2;
+		std::vector<double> D12;
+		std::vector<double> Area;
+		_points(vtkPolyData *Skeleton);
+		void CalculateRelativeDistances();
+		double GetX(int i);
+		double GetY(int i);
+		double GetZ(int i);
+		double GetBoundXmin() {return Bounds[0];}
+		double GetBoundXmax() {return Bounds[1];}
+		double GetBoundYmin() {return Bounds[2];}
+		double GetBoundYmax() {return Bounds[3];}
+		double GetBoundZmin() {return Bounds[4];}
+		double GetBoundZmax() {return Bounds[5];}
+	};
+
 	class _curve {
 	private:
 		vtkIdType n;
@@ -60,7 +85,7 @@
 	};
 
 	void GeometricalAnalysis(const char FilePrefix[]);
-	void ExportResults(std::vector<_curve> Curves, const char FilePrefix[]);
+	void ExportResults(std::vector<_curve> Curves, _points Nodes, const char FilePrefix[]);
 	double DotProduct(double to[3], double tf[3]);
 	double GetLength(vtkPolyData *Skeleton, vtkIdType cell_id, bool plot);
 
@@ -98,6 +123,8 @@ double DotProduct(double to[3], double tf[3]) {
 
 void GeometricalAnalysis(const char FilePrefix[]) {
 	
+	/* PARAMETRIC CURVES */
+
 	char _FullPath[256];
 	sprintf(_FullPath,"%s_skeleton.vtk",FilePrefix);
 
@@ -127,9 +154,16 @@ void GeometricalAnalysis(const char FilePrefix[]) {
 			Curves.push_back(curve);
 		}
 	}
+
+	/* POINTS IN SPACE */
 	
+	_points Nodes(Skell);
+	Nodes.CalculateRelativeDistances();
+
+	/* EXPORTING RESULTS */
+
 	if (Curves.size()) {
-		ExportResults(Curves,FilePrefix);
+		ExportResults(Curves,Nodes,FilePrefix);
 	} else {
 		printf("No edges long enough found.\n");
 	}
@@ -137,7 +171,9 @@ void GeometricalAnalysis(const char FilePrefix[]) {
 	Curves.clear();
 }
 
-void ExportResults(std::vector<_curve> Curves, const char FilePrefix[]) {
+void ExportResults(std::vector<_curve> Curves, _points Nodes, const char FilePrefix[]) {
+
+	/* PARAMETRIC CURVES */
 
 	#ifdef DEBUG
 		printf("Calculating tangent correlation decay...\n");
@@ -213,11 +249,144 @@ void ExportResults(std::vector<_curve> Curves, const char FilePrefix[]) {
 	}
 	fclose(fr);
 
+	/* POINTS IN SPACE */
+
+	sprintf(_FullPath,"%s.pts",FilePrefix);
+	FILE *fg = fopen(_FullPath,"w");
+	fprintf(fg,"Header here\n");
+	double avg_d1 = 0.0, avg_d2 = 0.0, avg_d12 = 0.0, avg_area = 0.0;
+	double max_d1 = 0.0, max_d2 = 0.0, max_d12 = 0.0, max_area = 0.0;
+	for (p = 0; p < Nodes.D1.size(); p++) {
+		avg_d1 += Nodes.D1[p];
+		avg_d2 += Nodes.D2[p];
+		avg_d12 += Nodes.D12[p];
+		avg_area += Nodes.Area[p];
+		max_d1 = (Nodes.D1[p]>max_d1) ? Nodes.D1[p] : max_d1;
+		max_d2 = (Nodes.D2[p]>max_d2) ? Nodes.D2[p] : max_d2;
+		max_d12 = (Nodes.D12[p]>max_d12) ? Nodes.D12[p] : max_d12;
+		max_area = (Nodes.Area[p]>max_area) ? Nodes.Area[p] : max_area;
+	}
+	fprintf(fg,"%1.6f\t%1.6f\t%1.6f\t%1.6f\t%1.6f\t%1.6f\t%1.6f\t%1.6f\n",avg_d1/Nodes.D1.size(),avg_d2/Nodes.D1.size(),avg_d12/Nodes.D1.size(),avg_area/Nodes.D1.size(),max_d1,max_d2,max_d12,max_area);
+	fclose(fg);
+
+	double x, y, z, r[3];
+	sprintf(_FullPath,"%s.normcoo",FilePrefix);
+	FILE *fn = fopen(_FullPath,"w");
+	for (p = 0; p < Nodes.D1.size(); p++) {
+		x = Nodes.GetX(p);
+		y = Nodes.GetY(p);
+		z = Nodes.GetZ(p);
+		x = (x-Nodes.GetBoundXmin()) / (Nodes.GetBoundXmax()-Nodes.GetBoundXmin());
+		y = (y-Nodes.GetBoundYmin()) / (Nodes.GetBoundYmax()-Nodes.GetBoundYmin());
+		z = (z-Nodes.GetBoundZmin()) / (Nodes.GetBoundZmax()-Nodes.GetBoundZmin());
+		fprintf(fn,"%1.4f\t%1.4f\t%1.4f\n",x,y,z);
+	}
+	fclose(fn);
+
 	#ifdef DEBUG
 		printf("\tDone!\n");
 	#endif
 
 }
+
+/* ====================================================================
+	_POINTS METHODS
+======================================================================*/
+
+
+_points::_points(vtkPolyData *Skeleton) {
+	Points = vtkSmartPointer<vtkPoints>::New();
+	PolyPoints = vtkSmartPointer<vtkPolyData>::New();
+	Tree = vtkSmartPointer<vtkKdTreePointLocator>::New();
+	double *B = Skeleton -> GetPoints() -> GetBounds();
+
+	int i, j, line, N = Skeleton->GetPoints()->GetNumberOfPoints();
+	bool *Used = new bool[N];
+	vtkCell *Line;
+	double ri[3], rj[3];
+	for (i = N; i--;) Used[i] = 0;
+	for (i = 6; i--;) Bounds[i] = B[i];
+
+	#ifdef DEBUG
+		printf("\tSkeleton Bounds: %1.3f\t%1.3f\t%1.3f\t%1.3f\t%1.3f\t%1.3f\n",Bounds[0],Bounds[1],Bounds[2],Bounds[3],Bounds[4],Bounds[5]);
+	#endif
+
+	for (line = 0; line < Skeleton->GetNumberOfCells(); line++) {
+		Line = Skeleton -> GetCell(line);
+		i = Line -> GetPointId(0);
+		j = Line -> GetPointId(Line->GetNumberOfPoints()-1);
+		if (!Used[i]) {
+			Skeleton -> GetPoints() -> GetPoint(i,ri);
+			Points -> InsertNextPoint(ri);
+			Used[i] = 1;
+		}
+		if (!Used[j]) {
+			Skeleton -> GetPoints() -> GetPoint(j,rj);
+			Points -> InsertNextPoint(rj);
+			Used[j] = 1;
+		}
+	}
+	delete[] Used;
+
+	PolyPoints -> SetPoints(Points);
+	Tree -> SetDataSet(PolyPoints);
+	Tree -> BuildLocator();
+}
+
+void _points::CalculateRelativeDistances() {
+
+	int i, j, k;
+	double dij, dik, djk, a, ri[3], rj[3], rk[3], rij[3], rik[3];
+	vtkSmartPointer<vtkIdList> List = vtkSmartPointer<vtkIdList>::New();
+
+	for (int i = 0; i < Points->GetNumberOfPoints(); i++) {
+		Points -> GetPoint(i,ri);
+		Tree -> FindClosestNPoints(3,ri,List);
+		j = List -> GetId(1);
+		Points -> GetPoint(j,rj);
+		k = List -> GetId(2);
+		Points -> GetPoint(k,rk);
+	
+		dij = sqrt(pow(rj[0]-ri[0],2)+pow(rj[1]-ri[1],2)+pow(rj[2]-ri[2],2));
+		D1.push_back(dij);
+		dik = sqrt(pow(rk[0]-ri[0],2)+pow(rk[1]-ri[1],2)+pow(rk[2]-ri[2],2));
+		D2.push_back(dik);
+		djk = sqrt(pow(rk[0]-rj[0],2)+pow(rk[1]-rj[1],2)+pow(rk[2]-rj[2],2));
+		D12.push_back(djk);
+
+		rij[0] = (rj[0]-ri[0]) / dij;
+		rij[1] = (rj[1]-ri[1]) / dij;
+		rij[2] = (rj[2]-ri[2]) / dij;
+
+		rik[0] = (rk[0]-ri[0]) / dik;
+		rik[1] = (rk[1]-ri[1]) / dik;
+		rik[2] = (rk[2]-ri[2]) / dik;
+
+		a = 0.5 * dij * dik * sin( acos( DotProduct(rij,rik) ) );
+
+		Area.push_back(a);
+
+	}
+}
+
+double _points::GetX(int i) {
+	double r[3];
+	Points -> GetPoint(i,r);
+	return r[0];
+}
+
+double _points::GetY(int i) {
+	double r[3];
+	Points -> GetPoint(i,r);
+	return r[1];
+}
+
+double _points::GetZ(int i) {
+	double r[3];
+	Points -> GetPoint(i,r);
+	return r[2];
+}
+
 
 /* ====================================================================
 	_CURVE METHODS
